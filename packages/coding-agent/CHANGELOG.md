@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Reduced rendering overhead while streaming long Write previews ([#10955](https://github.com/can1357/oh-my-pi/issues/10955)).
+
 
 ### Added
 

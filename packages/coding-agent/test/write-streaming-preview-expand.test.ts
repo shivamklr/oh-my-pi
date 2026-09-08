@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import {
 	decodeStreamedToolArgs,
@@ -14,10 +14,6 @@ const hasLine = (lines: readonly string[], n: number): boolean =>
 
 describe("write streaming preview honors Ctrl+O expansion", () => {
 	let initialized = false;
-
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
 
 	async function makePendingWrite(lineCount: number) {
 		if (!initialized) {
@@ -73,31 +69,72 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 		expect(hasLine(collapsed, 4)).toBe(true);
 		expect(stripAnsi(collapsed.join("\n"))).not.toContain("earlier line");
 	});
-	it("reuses the highlighted streaming body across frame renders", async () => {
-		if (!initialized) {
-			await themeModule.initTheme();
-			initialized = true;
-		}
-		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
-		expect(uiTheme).toBeDefined();
+
+	it("keeps completed code rows stable while the footer animates", async () => {
+		const uiTheme = await getUiTheme();
 		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
-		const highlightSpy = vi
-			.spyOn(themeModule, "highlightCode")
-			.mockImplementation((code: string) => code.split("\n"));
+
 		const component = writeToolRenderer.renderCall(
-			{ path: "/tmp/cache.ts", content: "const a = 1;\nconst b = 2;" },
+			{ path: "/tmp/cache.ts", content: "const a = 1;\nconst b = 2;\n" },
 			options,
-			uiTheme!,
+			uiTheme,
 		);
 		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
 
-		component.render(80);
-		component.render(120);
-		expect(highlightSpy).toHaveBeenCalledTimes(1);
+		const frame80 = component.render(80);
+		const frame120 = component.render(120);
 
+		// Frame animation tick (spinnerFrame 0 -> 1)
 		options.spinnerFrame = 1;
-		component.render(120);
-		expect(highlightSpy).toHaveBeenCalledTimes(1);
+		const frame120Tick = component.render(120);
+
+		// Semantically locate the streaming status row rather than assuming a hardcoded bottom offset.
+		const statusIndex = frame120.findIndex(line => stripAnsi(line).includes("… (streaming)"));
+		expect(statusIndex).toBeGreaterThan(-1);
+
+		// 1. All content rows above the streaming status row (code lines and gutters)
+		// remain strictly byte-identical across animation frames.
+		expect(frame120Tick.slice(0, statusIndex)).toEqual(frame120.slice(0, statusIndex));
+
+		// 2. The streaming status line updates its animated spinner glyph while keeping its label:
+		const statusTick = frame120Tick[statusIndex] ?? "";
+		const statusOriginal = frame120[statusIndex] ?? "";
+		expect(statusTick).not.toBe(statusOriginal);
+		expect(stripAnsi(statusTick)).toContain("… (streaming)");
+		expect(stripAnsi(statusOriginal)).toContain("… (streaming)");
+
+		// 3. Width reframing (80 -> 120) preserves visible code lines:
+		const text80 = stripAnsi(frame80.join("\n"));
+		const text120 = stripAnsi(frame120.join("\n"));
+		expect(text80).toContain("const a = 1;");
+		expect(text80).toContain("const b = 2;");
+		expect(text120).toContain("const a = 1;");
+		expect(text120).toContain("const b = 2;");
+	});
+
+	it("restores discarded head rows after collapse, growth, and re-expansion", async () => {
+		const uiTheme = await getUiTheme();
+		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const lines = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`);
+		for (const [expanded, count] of [
+			[false, 40],
+			[true, 40],
+			[false, 40],
+			[false, 80],
+			[true, 80],
+		] as const) {
+			options.expanded = expanded;
+			const component = writeToolRenderer.renderCall(
+				{ path: "/tmp/growing.ts", content: lines.slice(0, count).join("\n") },
+				options,
+				uiTheme,
+			);
+			if (!component) throw new Error("expected a write preview");
+			const rendered = component.render(120);
+			for (let line = 1; line <= count; line++) {
+				expect(hasLine(rendered, line)).toBe(expanded || line > count - 12);
+			}
+		}
 	});
 
 	it("coerces truthy non-string content for pending write previews", async () => {
